@@ -2798,7 +2798,7 @@ function scatterDoseAt(point, sources, beamDir, state, parts, shield, excludeNam
   let devTotal = 0;                       // device-scatter contributions (corrected separately)
   // Body used for exit attenuation of patient scatter (skipped when `parts` is
   // supplied, since that path already integrates through the patient).
-  const sbParts = (!parts && SCAT_EXIT_MU > 0 && !state.removePatient)
+  const sbParts = ((!parts || parts.opOnly) && SCAT_EXIT_MU > 0 && !state.removePatient)
     ? scatterBodyParts(state) : null;
   const muExit = (state.phantomMu != null ? state.phantomMu : state.muWater) * SCAT_EXIT_MU;
   // Beam-frame axes for the collimator angular response.
@@ -2847,12 +2847,13 @@ function scatterDoseAt(point, sources, beamDir, state, parts, shield, excludeNam
     if (parts) {
       const od = rayTissuePath(s.pos, point, parts, excludeName, state.muWater);
       attn = Math.exp(-od);
-    } else if (sbParts && s.kind !== 'device') {
+    }
+    if ((!parts || parts.opOnly) && sbParts && s.kind !== 'device') {   // v116: operator-only shadow keeps the calibrated patient exit attenuation
       // Exit path through the scattering body itself. Buildup for multiple
       // scatter: photons that scatter again still arrive, so a linear buildup
       // B = 1 + (A_legacy + A_ms)*od compensates the pure-exponential loss.
       const od = muExit * rayPathLength(s.pos, point, sbParts);
-      if (od > 0) attn = (1 + (SCAT_BUILDUP_A + SCAT_MS_A)*od) * Math.exp(-od);
+      if (od > 0) attn *= (1 + (SCAT_BUILDUP_A + SCAT_MS_A)*od) * Math.exp(-od);
     }
     let contrib = baseK * g * inv2 * attn * s.weight * carmT;
     if (s.dev === 'col') {
@@ -4113,18 +4114,19 @@ function renderHeatmap2D(ctx, W, H, plane, sliceVal, state, axesOverride) {
   // for the patient part only. Everything else (device sources, operator/C-arm
   // attenuation & silhouettes, the 3D view, and all dose calculations) uses its
   // own separate source list and is untouched.
-  if (plane === 'xy' || plane === 'yz') {
-    for (const s of sources) {
-      if (s.kind !== 'device') s.pos = { x: s.pos.x, y: -s.pos.y, z: s.pos.z };
-    }
-  }
+  // v114: Top / Side scatter maps are no longer Y-flipped (same frame as the dose calculation and the Front view)
   // Both patient and operator are water-equivalent attenuators.  Scatter
   // rays that cross the operator's torso/head/limbs are reduced too.
-  let parts = state.absorption ? [...patientBodyParts(state), ...operatorBodyParts(state)] : null;
+  // v116: the operator always casts a shadow on the 2D maps while shown, even with
+  // tissue attenuation off (then only the operator attenuates; the patient keeps the
+  // calibrated exit attenuation). Display only — the dose results are unchanged.
+  const opOnly = !state.absorption && !state.removeOperator && state.showOperator !== false;
+  let parts = state.absorption ? [...patientBodyParts(state), ...operatorBodyParts(state)]
+            : opOnly ? Object.assign(operatorBodyParts(state), { opOnly: true }) : null;
   // Mirror the patient attenuator to match the mirrored patient sources above,
   // so the (display-only) patient scatter stays a clean Y-mirror. The operator
   // attenuator is left un-mirrored (its shadow position is unchanged).
-  if ((plane === 'xy' || plane === 'yz') && parts) {
+  if (parts) {   // v117: Front too. v115: the operator's shadow is drawn where the operator is drawn (Y-mirrored in Top / Side)
     const flipY = (p) => {
       const q = { ...p };
       if (q.c)  q.c  = { ...q.c,  y: -q.c.y };
@@ -4132,7 +4134,8 @@ function renderHeatmap2D(ctx, W, H, plane, sliceVal, state, axesOverride) {
       if (q.p2) q.p2 = { ...q.p2, y: -q.p2.y };
       return q;
     };
-    parts = [...patientBodyParts(state).map(flipY), ...operatorBodyParts(state)];
+    parts = state.absorption ? [...patientBodyParts(state), ...operatorBodyParts(state).map(flipY)]
+                             : Object.assign(operatorBodyParts(state).map(flipY), { opOnly: true });
   }
   const shield = buildShield(state, center);
   // Bed (× 0.9 transmission per crossing) and C-arm (fully blocking).
@@ -4144,10 +4147,10 @@ function renderHeatmap2D(ctx, W, H, plane, sliceVal, state, axesOverride) {
   if (plane === 'xy') {
     xMin=-90; xMax=110; yMin=-110; yMax=90;
     if (axesOverride) { xMin=axesOverride.xMin; xMax=axesOverride.xMax; yMin=axesOverride.yMin; yMax=axesOverride.yMax; }
-    makePoint = (a,b) => ({x:a, y:-b, z:sliceVal});   // 2D表示Y反転(患者/C-arm以外)
+    makePoint = (a,b) => ({x:a, y:b, z:sliceVal});    // v114: scatter map not Y-flipped
   } else if (plane === 'yz') {
     xMin=-110; xMax=90; yMin=-110; yMax=130;
-    makePoint = (a,b) => ({x:sliceVal, y:-a, z:b});   // 2D表示Y反転(患者/C-arm以外)
+    makePoint = (a,b) => ({x:sliceVal, y:a, z:b});    // v114: scatter map not Y-flipped
   } else if (plane === 'xz') {
     xMin=-90; xMax=110; yMin=-110; yMax=130;
     makePoint = (a,b) => ({x:a, y:sliceVal, z:b});
